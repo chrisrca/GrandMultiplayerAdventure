@@ -1,0 +1,11 @@
+[14:07:43.457] Net started as HOST (port 47908, name 'Host', id 00001111, state 712 bytes)
+[14:07:43.457] Net started as CLIENT (port 47908, name 'A', id 00002222, state 712 bytes)
+[14:07:43.457] Will connect to host 127.0.0.1
+[14:07:43.457] Net started as CLIENT (port 47908, name 'B', id 00003333, state 712 bytes)
+[14:07:43.457] Will connect to host 127.0.0.1
+[14:07:43.534] Player joined: 'ã¹ã­ã¼ A' (00002222)
+[14:07:43.534] Player joined: 'B' (00003333)
+[14:07:43.534] Player joined: 'B' (00003333)
+[14:07:43.580] Player joined: 'Host' (00001111)
+[14:07:43.580] Player joined: 'Host' (00001111)
+[14:07:43.595] Player joined: 'ã¹ã­ã¼ A' (00002222)

@@ -1,0 +1,9 @@
+#include <windows.h>
+
+// Paths are relative to the repository root (make runs windres from there).
+
+// The mod itself, written to <game>\zlib.dll on install.
+101 RCDATA "build/obj/zlib.dll"
+
+// Common controls v6 (themed buttons), per-monitor DPI awareness.
+1 RT_MANIFEST "installer/setup.manifest"
