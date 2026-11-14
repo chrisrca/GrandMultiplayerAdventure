@@ -1,2 +1,10 @@
+# build output (CI builds the installer)
+build/
+
+# local-only: reverse-engineering workspace, notes, demo captures, in-game test helpers
 .tools/
-mod/build/
+docs/
+demo/
+tests/ingame/
+
+*.log

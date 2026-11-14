@@ -10,7 +10,7 @@
 //       echo: copies the host's live pose every tick, rotated by yawDeg about
 //       the host's feet and moved by (dx, dy). With yaw 0 the bot is an exact
 //       twin standing beside you; it must turn/lean/crouch/jump exactly as you
-//       do. Used by tests/ingame to verify rotation and pose fidelity.
+//       do. Used to verify rotation and pose fidelity in game.
 //
 //   fakeclient.exe host <port> <scene> <seconds>
 //       fake host that claims to be on <scene> and circles the client.

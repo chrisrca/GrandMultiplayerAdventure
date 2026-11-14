@@ -1,7 +1,7 @@
 // Game-specific memory access for gma_wonderlands.exe (Steam build,
 // SHA-256 766927fdbe20e687d85e99b3ed988eac8cf50f782644363812561f1f73629011).
 // All offsets were recovered with REA (Ghidra static analysis) and confirmed
-// at runtime with Frida; see docs/RE_NOTES.md.
+// at runtime with Frida.
 #pragma once
 #include <cstdint>
 #include <string>

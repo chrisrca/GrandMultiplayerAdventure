@@ -6,7 +6,7 @@
 // the row's "Label: (A) (B)" text) and action (runs on click). We append our own
 // header + buttons to that list right before the game looks for the hovered /
 // clicked item, so the game lays out, draws, highlights and clicks them exactly
-// like its own rows. See docs/RE_NOTES.md "Settings screen".
+// like its own rows.
 #pragma once
 #include <cstdint>
 #include <functional>

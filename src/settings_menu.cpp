@@ -12,7 +12,7 @@
 
 namespace settings_menu {
 
-// ---- game functions (RVAs, REA/Ghidra; see docs/RE_NOTES.md) -------------------
+// ---- game functions (RVAs, found with REA/Ghidra) ----------------------------------
 // Hovered-item lookup, called by GameMenuRenderer_Settings::doUpdate right after
 // it has rebuilt the item list and before it handles clicks:
 //   Out* find_hovered(Out*, vector<Item>* items, Input*)
