@@ -27,6 +27,9 @@ struct Player {
     bool host = false;
     std::string status;      // right-hand text in the list ("42M", "WALDTAL", ...)
     bool dim = false;        // not on our mountain / not in world
+    // Map data (remote players skiing on any mountain)
+    bool onMap = false;
+    std::string scene;            // internal name of their mountain
     // World data (remote players on our mountain only)
     bool visible = false;
     float anchor[3] = {0, 0, 0};  // top of the head (label anchor)

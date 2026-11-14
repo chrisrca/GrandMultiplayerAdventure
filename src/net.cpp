@@ -46,7 +46,6 @@ Config LoadConfig(const std::wstring& iniPath) {
         else if (k == "host_address") c.hostAddr = v;  // "ip", "name" or either with ":port"
         else if (k == "port") c.port = (uint16_t)atoi(v.c_str());
         else if (k == "name") c.name = v.substr(0, kMaxName - 1);
-        else if (k == "follow_host_scene") c.followHostScene = atoi(v.c_str()) != 0;
         else if (k == "send_rate_hz") c.sendRateHz = std::min(60.f, std::max(1.f, (float)atof(v.c_str())));
         else if (k == "show_names") c.showNames = atoi(v.c_str()) != 0;
         else if (k == "show_panel") c.showPanel = atoi(v.c_str()) != 0;
@@ -70,6 +69,17 @@ static int16_t Q(float v, float scale) {
     if (!(q == q)) q = 0;  // NaN
     q = q < -32767.f ? -32767.f : (q > 32767.f ? 32767.f : q);
     return (int16_t)lrintf(q);
+}
+
+uint8_t PackHeading(const float dir[2]) {
+    float a = atan2f(dir[1], dir[0]) * (128.f / 3.14159265f);  // -128..128
+    return (uint8_t)(lrintf(a) & 0xff);
+}
+
+void UnpackHeading(uint8_t h, float dir[2]) {
+    float a = (float)h * (3.14159265f / 128.f);
+    dir[0] = cosf(a);
+    dir[1] = sinf(a);
 }
 
 void PackPose(PlayerState& ps, int count, const float (*bones)[kBoneFloats]) {
@@ -164,7 +174,6 @@ bool Net::HandleState(const PlayerState& in, double now, const void* fromAddr, i
 
     auto it = std::find_if(remotes_.begin(), remotes_.end(), [&](const RemotePlayer& r) { return r.state.id == ps.id; });
     if (it == remotes_.end()) {
-        if (remotes_.size() >= kMaxPlayers) return false;
         RemotePlayer r;
         r.state = ps;
         memcpy(r.prevPos, ps.pos, sizeof r.prevPos);
@@ -187,7 +196,6 @@ bool Net::HandleState(const PlayerState& in, double now, const void* fromAddr, i
             return q.addrLen == fromLen && memcmp(q.addr, fromAddr, fromLen) == 0;
         });
         if (p == peers_.end()) {
-            if (peers_.size() >= kMaxPlayers) return true;
             Peer np;
             memcpy(np.addr, fromAddr, std::min<int>(fromLen, sizeof np.addr));
             np.addrLen = fromLen;
@@ -236,10 +244,6 @@ void Net::Receive(double now) {
             }
         } else {
             hostHeard_ = now;
-            if (ps.flags & kFlagHost) {
-                ps.scene[kMaxScene - 1] = 0;
-                hostScene_ = ps.scene;
-            }
             HandleState(ps, now, nullptr, 0);
         }
     }
@@ -307,6 +311,5 @@ void Net::Tick(double now, const PlayerState& local) {
 }
 
 std::vector<RemotePlayer> Net::Remotes() const { return remotes_; }
-std::string Net::HostScene() const { return hostScene_; }
 
 }  // namespace mp

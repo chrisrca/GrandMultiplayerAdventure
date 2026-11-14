@@ -2,10 +2,11 @@
 //
 // Topology: one player runs as HOST (listens on a UDP port), everyone else is a
 // CLIENT pointed at the host. Every peer sends its own PlayerState (including
-// the game's skeletal pose of the skier) to the host ~20x/s. The host forwards
-// each state to every other client and sends its own state, flagged kFlagHost,
-// so clients know which mountain the host is on. One state per datagram keeps
-// packets well under the MTU.
+// the game's skeletal pose of the skier and the mountain it is on) to the host
+// ~20x/s. The host forwards each state to every other client and sends its own
+// state, flagged kFlagHost. Everyone goes wherever they like; skiers are shown
+// to the players on the same mountain. One state per datagram keeps packets
+// well under the MTU.
 #pragma once
 #include <cstdint>
 #include <string>
@@ -17,13 +18,13 @@ constexpr uint32_t kMagic = 0x4D414D47;  // "GMAM"
 constexpr uint16_t kProtoVersion = 4;
 constexpr int kMaxName = 48;  // UTF-8 bytes incl. terminator (Steam names can be non-Latin)
 constexpr int kMaxScene = 32;
-constexpr int kMaxPlayers = 16;
 constexpr int kMaxBones = 26;
 constexpr int kBoneFloats = 10;
 
 enum StateFlags : uint8_t {
     kFlagInWorld = 1,  // pose/pos are valid (player is skiing in a scene)
     kFlagHost = 2,     // sender is the host
+    kFlagHeading = 4,  // `heading` is set (older builds leave it 0 and don't set this)
 };
 
 #pragma pack(push, 1)
@@ -39,7 +40,8 @@ struct PlayerState {
     uint8_t color;              // UI palette index
     uint8_t flags;              // StateFlags
     uint8_t boneCount;          // pose bones in use
-    uint8_t pad;
+    uint8_t heading;            // facing (the game's GetSkiDirectionXY), 256 steps
+                                // per turn from +X toward +Y; see kFlagHeading
     float root[3];              // pose origin; bones are stored relative to it
     // Per bone: start xyz, end xyz (millimetres from root), dir xyz (x32767)
     int16_t bones[kMaxBones][9];
@@ -61,6 +63,10 @@ enum PacketType : uint8_t {
     kPktBye = 3,     // sender is leaving
 };
 
+// Facing direction <-> wire byte.
+uint8_t PackHeading(const float dir[2]);
+void UnpackHeading(uint8_t h, float dir[2]);
+
 // Pose <-> wire conversion.
 void PackPose(PlayerState& ps, int count, const float (*bones)[kBoneFloats]);
 int UnpackPose(const PlayerState& ps, float (*bones)[kBoneFloats]);
@@ -79,7 +85,6 @@ struct Config {
     std::string hostAddr = "127.0.0.1";  // host to join: "ip", "name", or either with ":port"
     uint16_t port = 47800;
     std::string name = "Skier";
-    bool followHostScene = true;
     float sendRateHz = 20.f;
     bool showNames = true;
     bool showPanel = true;
@@ -100,8 +105,6 @@ public:
     // Snapshot of remote players (excludes the local player).
     std::vector<RemotePlayer> Remotes() const;
 
-    // Scene the host is in, as last reported by the host (clients only).
-    std::string HostScene() const;
     bool IsHost() const { return cfg_.host; }
     // Client: seconds since the host last answered (inf if never).
     double SinceHostHeard(double now) const { return hostHeard_ > 0 ? now - hostHeard_ : 1e9; }
@@ -134,7 +137,6 @@ private:
     };
     std::vector<Peer> peers_;            // host only: known client endpoints
     std::vector<RemotePlayer> remotes_;  // everybody: other players
-    std::string hostScene_;
     uint32_t seq_ = 0;
     double hostHeard_ = 0;
     std::vector<Event> events_;

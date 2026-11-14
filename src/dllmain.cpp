@@ -274,30 +274,17 @@ std::string PoseSummary(const game::Pose& p) {
     return b;
 }
 
-// ---- follow host -----------------------------------------------------------------
-std::string g_followTarget;
-int g_followAttempts = 0;
-double g_followLast = -1e9;
-
-void FollowHost(double now, const game::LocalInfo& li, bool fresh) {
-    if (g_cfg.host || !g_cfg.followHostScene || !fresh || li.loading) return;
-    std::string hs = g_net.HostScene();
-    if (hs.empty() || g_net.SinceHostHeard(now) > 3.0) return;
-    if (hs == li.scene) {
-        g_followAttempts = 0;
-        g_followTarget.clear();
+// Facing for the piste-map pin: what the sender's own game reports, else (older
+// builds) a guess from the first bone, which runs tail -> tip of the skis.
+void FacingOf(const mp::PlayerState& st, const game::Pose& p, float dir[2]) {
+    if (st.flags & mp::kFlagHeading) {
+        mp::UnpackHeading(st.heading, dir);
         return;
     }
-    if (hs != g_followTarget) {
-        g_followTarget = hs;
-        g_followAttempts = 0;
-    }
-    if (g_followAttempts >= 3 || now - g_followLast < 12.0) return;
-    g_followAttempts++;
-    g_followLast = now;
-    game::RequestTravel(hs);
-    AddToast("Travelling to " + game::PrettyScene(hs));
-    if (g_followAttempts == 3) Log("Follow: giving up on '%s' after 3 attempts (locked?)", hs.c_str());
+    if (p.count <= 0) return;
+    float hx = p.bones[0][3] - p.bones[0][0], hy = p.bones[0][4] - p.bones[0][1];
+    float hl = sqrtf(hx * hx + hy * hy);
+    if (hl > 1e-3f) dir[0] = hx / hl, dir[1] = hy / hl;
 }
 
 // ---- Settings > Multiplayer ----------------------------------------------------------
@@ -444,7 +431,6 @@ void SaveConfig() {
     v.hostAddress = g_cfg.hostAddr;
     v.port = g_cfg.port;
     v.name = g_cfg.name;
-    v.followHostScene = g_cfg.followHostScene;
     v.showNames = g_cfg.showNames;
     v.showPanel = g_cfg.showPanel;
     v.toggleKey = "F" + std::to_string(g_cfg.toggleKey - VK_F1 + 1);
@@ -462,8 +448,6 @@ void RestartNet() {
     g_net.Stop();
     g_net = mp::Net();
     g_smooth.clear();
-    g_followTarget.clear();
-    g_followAttempts = 0;
     g_netOk = g_net.Start(g_cfg, g_localId);
     if (!g_netOk) AddToast(g_cfg.host ? "Port " + std::to_string(g_cfg.port) + " is busy" : "Network error");
     else AddToast(g_cfg.host ? "Hosting on port " + std::to_string(g_cfg.port) : "Joining " + HostAddressText());
@@ -581,11 +565,15 @@ void OnFrame() {
     memcpy(ps.head, li.head, sizeof ps.head);
     ps.hue = li.hue;
     ps.color = (uint8_t)myColor;
-    ps.flags = (fresh && !li.loading) ? mp::kFlagInWorld : 0;
-    if (fresh) mp::PackPose(ps, li.pose.count, li.pose.bones);
+    ps.flags = fresh ? mp::kFlagInWorld : 0;
+    if (fresh) {
+        mp::PackPose(ps, li.pose.count, li.pose.bones);
+        // The direction the game's own map pin uses for us.
+        ps.heading = mp::PackHeading(li.dir);
+        ps.flags |= mp::kFlagHeading;
+    }
     if (g_netOk) g_net.Tick(now, ps);
     for (auto& e : g_net.TakeEvents()) AddToast(e.name + (e.joined ? " joined" : " left"), e.steamId);
-    if (g_gameOk && g_netOk) FollowHost(now, li, fresh);
 
     std::vector<mp::RemotePlayer> remotes = g_netOk ? g_net.Remotes() : std::vector<mp::RemotePlayer>{};
     std::vector<game::RemoteDraw> draws;
@@ -639,8 +627,25 @@ void OnFrame() {
         memcpy(gp.color, kPalette[st.color % 8], sizeof gp.color);
         gp.host = (st.flags & mp::kFlagHost) != 0;
         gp.dim = !sameScene;
+        gp.scene = st.scene;
+
+        // Velocity from the last two samples, to move them on between packets.
+        float vel[3] = {0, 0, 0};
+        double sdt = r.curTime - r.prevTime;
+        if (sdt > 0.01 && sdt < 0.5)
+            for (int i = 0; i < 3; ++i) vel[i] = (st.pos[i] - r.prevPos[i]) / (float)sdt;
+        float ahead = (float)std::min(0.2, now - r.curTime);
+
         if (!sameScene) {
             gp.status = !inWorld ? "Loading" : game::PrettyScene(st.scene);
+            if (inWorld) {
+                // Not drawn on our slope, but shown on their mountain's piste map.
+                gp.onMap = true;
+                for (int i = 0; i < 3; ++i) gp.feet[i] = st.pos[i] + vel[i] * ahead;
+                game::Pose raw;
+                raw.count = mp::UnpackPose(st, raw.bones);
+                FacingOf(st, raw, gp.dir);
+            }
             gf.players.push_back(gp);
             g_smooth.erase(st.id);
             continue;
@@ -649,11 +654,6 @@ void OnFrame() {
         // Target pose = latest sample shifted by velocity * time since it arrived.
         game::Pose target;
         target.count = mp::UnpackPose(st, target.bones);
-        float vel[3] = {0, 0, 0};
-        double sdt = r.curTime - r.prevTime;
-        if (sdt > 0.01 && sdt < 0.5)
-            for (int i = 0; i < 3; ++i) vel[i] = (st.pos[i] - r.prevPos[i]) / (float)sdt;
-        float ahead = (float)std::min(0.2, now - r.curTime);
         for (int b = 0; b < target.count; ++b)
             for (int i = 0; i < 3; ++i) {
                 target.bones[b][i] += vel[i] * ahead;
@@ -676,6 +676,7 @@ void OnFrame() {
         if (g_cfg.debugPoseLog) poseLog += " | R:" + std::string(st.name) + " " + PoseSummary(it->second.pose);
 
         gp.visible = true;
+        gp.onMap = true;
         gp.dist = Dist(li.feet, st.pos);
         gp.status = Meters(gp.dist);
         const game::Pose& sp = it->second.pose;
@@ -684,10 +685,7 @@ void OnFrame() {
         for (int b = 0; b < sp.count; ++b)
             for (int e = 0; e < 2; ++e) gp.outline.insert(gp.outline.end(), &sp.bones[b][e * 3], &sp.bones[b][e * 3] + 3);
         memcpy(gp.feet, sp.bones[0], sizeof gp.feet);
-        // heading from the skis (first bone runs tail -> tip)
-        float hx = sp.bones[0][3] - sp.bones[0][0], hy = sp.bones[0][4] - sp.bones[0][1];
-        float hl = sqrtf(hx * hx + hy * hy);
-        if (hl > 1e-3f) gp.dir[0] = hx / hl, gp.dir[1] = hy / hl;
+        FacingOf(st, sp, gp.dir);
         gf.players.push_back(gp);
     }
     for (auto it = g_smooth.begin(); it != g_smooth.end();)
@@ -710,7 +708,7 @@ void OnFrame() {
     static double lastDiag = 0;
     if (now - lastDiag > 10.0) {
         lastDiag = now;
-        Log("diag: scene='%s' fresh=%d loading=%d vp=%d remotes=%zu bones=%d", li.scene.c_str(), fresh, li.loading,
+        Log("diag: scene='%s' fresh=%d vp=%d remotes=%zu bones=%d", li.scene.c_str(), fresh,
             vpFresh, remotes.size(), li.pose.count);
     }
 }

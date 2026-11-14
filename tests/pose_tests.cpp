@@ -140,6 +140,17 @@ static void TestPackRoundTrip() {
     CHECK(tagsOk, "counts/tags preserved");
 }
 
+static void TestHeading() {
+    // The facing byte: 256 steps per turn, so within 0.71 degrees everywhere.
+    float worst = 0;
+    for (int i = 0; i < 3600; ++i) {
+        float a = (i / 10.f - 180.f) / 57.29578f, in[2] = {cosf(a), sinf(a)}, out[2];
+        mp::UnpackHeading(mp::PackHeading(in), out);
+        worst = fmaxf(worst, fabsf(WrapDeg((atan2f(out[1], out[0]) - a) * 57.29578f)));
+    }
+    CHECK(worst <= 0.71f, "heading byte round trip within %.2f deg", worst);
+}
+
 static void TestRotation() {
     printf("rotation: heading, lean and bone lengths (yaw sweep -180..180, through the network codec)\n");
     float src[mp::kMaxBones][kBoneFloats] = {}, rot[mp::kMaxBones][kBoneFloats] = {},
@@ -233,10 +244,13 @@ static void TestNetworkRelay() {
     };
     // A has a non-Latin Steam name; every player carries a SteamID64.
     const char* aName = "ã¹ã­ã¼ A";  // "スキー A"
-    mp::PlayerState hs = state("Host", "waldtal", pose), as = state(aName, "waldtal", rotated),
+    mp::PlayerState hs = state("Host", "waldtal", pose), as = state(aName, "hemberg", rotated),
                     bs = state("B", "waldtal", pose);
     hs.steamId = 76561197960287930ULL;
     as.steamId = 76561198000000001ULL;
+    const float aDir[2] = {-0.6f, 0.8f};
+    as.heading = mp::PackHeading(aDir);
+    as.flags |= mp::kFlagHeading;
     double t0 = GetTickCount64() / 1000.0;
     for (int i = 0; i < 300; ++i) {
         double now = GetTickCount64() / 1000.0 - t0;
@@ -258,7 +272,14 @@ static void TestNetworkRelay() {
     const mp::RemotePlayer* aAtB = find(rb, 0x2222);
     CHECK(aAtB != nullptr, "client B sees client A");
     CHECK(find(rb, 0x1111) != nullptr, "client B sees the host");
-    CHECK(b.HostScene() == "waldtal", "client B knows the host's scene ('%s')", b.HostScene().c_str());
+    if (aAtB) {
+        // Everyone picks their own mountain; each player's is relayed as-is.
+        CHECK(strcmp(aAtB->state.scene, "hemberg") == 0, "A's own mountain reaches B ('%s')", aAtB->state.scene);
+        float d[2];
+        mp::UnpackHeading(aAtB->state.heading, d);
+        CHECK((aAtB->state.flags & mp::kFlagHeading) && fabsf(d[0] - aDir[0]) < 0.02f && fabsf(d[1] - aDir[1]) < 0.02f,
+              "A's facing reaches B (%.3f, %.3f)", d[0], d[1]);
+    }
     CHECK(find(host.Remotes(), 0x2222) && find(host.Remotes(), 0x3333), "host sees both clients");
     if (aAtB) {
         float rx[mp::kMaxBones][kBoneFloats] = {};
@@ -283,6 +304,7 @@ static void TestNetworkRelay() {
 int main() {
     TestPackRoundTrip();
     TestRotation();
+    TestHeading();
     TestSmoothing();
     TestNetworkRelay();
     printf("\n%d checks, %d failed\n", g_checks, g_failures);

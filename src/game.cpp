@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstring>
+#include <deque>
 #include <atomic>
 #include <mutex>
 
@@ -18,9 +19,6 @@ namespace game {
 // on the game thread while a scene is active. Found via the RTTI of its local
 // boost::any holder type and confirmed at ~1 call/frame with Frida.
 constexpr uintptr_t kRvaHandleSceneMax = 0x1a1fb0;
-// game::goto_worldplace(globals+0xd20, u8 mode, SessionInfo*, SessionMutator*,
-//                       size_t sceneIdx, opt*, opt*, opt*, opt*)
-constexpr uintptr_t kRvaGotoWorldplace = 0x2bd830;
 // size_t current_scene_idx(SessionInfo+0x258) - honours a queued scene change.
 constexpr uintptr_t kRvaCurrentSceneIdx = 0x2d85a0;
 // ns_player::Player::GetSkiDirectionXY(Player const*, Vec2* out)
@@ -45,14 +43,12 @@ constexpr size_t kSessPlayers = 0x48;    // Player* (array, stride 0x10d0)
 constexpr size_t kSessSceneIdx = 0x258;  // size_t current scene index
 constexpr size_t kSessGlobals = 0x2d0;   // GMAGlobals** (shared_ptr)
 // SessionMutator layout
-constexpr size_t kMutGlobals = 0x50;     // GMAGlobals** (shared_ptr)
 // GMAGlobals
 constexpr size_t kGlobData = 0x40;       // -> data block
 constexpr size_t kDataHeadersBegin = 0x1dba8;  // vector<SceneHeader> (0x70 each)
 constexpr size_t kDataHeadersEnd = 0x1dbb0;
 constexpr size_t kHeaderStride = 0x70;
 constexpr size_t kHeaderName = 0x08;     // std::string internal name
-constexpr size_t kGlobWorldplaceArg = 0xd20;
 constexpr size_t kGlobSettings = 0xd30;         // settings map
 constexpr size_t kGlobCharModels = 0x1230;      // vector<CharacterModel> (0x18 each)
 constexpr size_t kDataLodSetting = 0x1d668;     // *(GMAGlobals+0x40)+0x1d668
@@ -70,8 +66,6 @@ constexpr size_t kPlayerHead = 0x340;    // Vec3<double>
 
 static const uint8_t kSigHandleSceneMax[14] = {0x48, 0x8b, 0xc4, 0x48, 0x89, 0x58, 0x18,
                                                0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55};
-static const uint8_t kSigGotoWorldplace[15] = {0x48, 0x8b, 0xc4, 0x48, 0x89, 0x58, 0x10, 0x4c,
-                                               0x89, 0x48, 0x20, 0x48, 0x89, 0x48, 0x08};
 static const uint8_t kSigCurrentSceneIdx[16] = {0x48, 0x83, 0xec, 0x18, 0x48, 0x8b, 0x41, 0x10,
                                                 0x4c, 0x8b, 0xc1, 0x48, 0x8b, 0x88, 0x78, 0x3c};
 static const uint8_t kSigGetSkiDir[15] = {0x48, 0x8b, 0xc4, 0x48, 0x89, 0x58, 0x08, 0x55,
@@ -85,8 +79,6 @@ static const uint8_t kSigCharRenderBuild[16] = {0x48, 0x8b, 0xc4, 0x48, 0x89, 0x
                                                 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56};
 
 using HandleSceneMaxFn = void(__fastcall*)(void* session, void* mutator);
-using GotoWorldplaceFn = void(__fastcall*)(void* arg0, uint64_t mode, void* session, void* mutator, uint64_t sceneIdx,
-                                           void* o6, void* o7, void* o8, void* o9);
 using CurrentSceneIdxFn = uint64_t(__fastcall*)(void* sessScene);
 using GetSkiDirFn = float*(__fastcall*)(void* player, float* out);
 using MakeGhostFrameFn = void*(__fastcall*)(void* out, void* player, float extrapolate);
@@ -98,7 +90,6 @@ using CharRenderBuildFn = void(__fastcall*)(void* self, void* frameInfo, void* r
 
 static uintptr_t g_base = 0;
 static HandleSceneMaxFn g_origHsm = nullptr;
-static GotoWorldplaceFn g_goto = nullptr;
 static CurrentSceneIdxFn g_curIdx = nullptr;
 static GetSkiDirFn g_skiDir = nullptr;
 static MakeGhostFrameFn g_makeGhost = nullptr;
@@ -109,7 +100,6 @@ static CharRenderBuildFn g_origCharBuild = nullptr;
 static std::mutex g_mu;
 static LocalInfo g_local;
 static std::vector<std::string> g_sceneNames;
-static std::string g_travelTo;  // pending request
 static std::vector<RemoteDraw> g_remoteDraws;
 static bool g_rendererHooked = false;
 static std::atomic<void*> g_globals{nullptr};
@@ -118,7 +108,7 @@ static std::atomic<void*> g_globals{nullptr};
 struct alignas(16) GhostFrameBuf {
     uint8_t bytes[kGhostSize + 8];
 };
-static std::vector<GhostFrameBuf> g_frameBufs;
+static std::deque<GhostFrameBuf> g_frameBufs;  // deque: growing never moves existing buffers
 
 double Now() {
     static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x; }();
@@ -167,10 +157,11 @@ static void __fastcall HookHandleSceneMax(void* session, void* mutator) {
     std::lock_guard<std::mutex> lk(g_mu);
     g_globals = Rd<void*>(Rd<uint8_t*>(session, kSessGlobals), 0);
     if (g_sceneNames.empty()) ReadSceneNames(session);
-    uint64_t rawIdx = Rd<uint64_t>(session, kSessSceneIdx);
-    uint64_t idx = g_curIdx((uint8_t*)session + kSessSceneIdx);
+    // The raw index is the mountain the player is on. current_scene_idx() also
+    // follows the mountain picked on the piste map (browsing other maps), so
+    // it is only used for what the map shows (ViewedScene).
+    uint64_t idx = Rd<uint64_t>(session, kSessSceneIdx);
     li.sceneIdx = (int)idx;
-    li.loading = rawIdx != idx;
     if (idx < g_sceneNames.size()) li.scene = g_sceneNames[idx];
     if (player) {
         for (int i = 0; i < 3; ++i) {
@@ -199,24 +190,6 @@ static void __fastcall HookHandleSceneMax(void* session, void* mutator) {
         li.hue = std::isfinite(hue) ? hue : 0.f;
     }
     g_local = li;
-
-    // --- pending travel request ---
-    if (!g_travelTo.empty()) {
-        std::string target = g_travelTo;
-        g_travelTo.clear();
-        size_t ti = 0;
-        while (ti < g_sceneNames.size() && g_sceneNames[ti] != target) ++ti;
-        if (ti == g_sceneNames.size()) {
-            Log("Travel: unknown scene '%s'", target.c_str());
-        } else if (ti != idx && !li.loading) {
-            Log("Travel: %s -> %s (idx %zu)", li.scene.c_str(), target.c_str(), ti);
-            // Four empty std::optional-like out/in params, as the game's own
-            // "restart scene" command passes them.
-            alignas(16) uint8_t o[4][64] = {};
-            uint8_t* globals = Rd<uint8_t*>(Rd<uint8_t*>(mutator, kMutGlobals), 0);
-            g_goto(globals + kGlobWorldplaceArg, 3, session, mutator, ti, o[0], o[1], o[2], o[3]);
-        }
-    }
 }
 
 // Runs whenever the game builds the render data for all characters (once per
@@ -238,7 +211,7 @@ static void __fastcall HookCharRenderBuild(void* self, void* frameInfo, void* re
     uint32_t lod = Rd<uint32_t>(data, kDataLodSetting);
     void* list = rd + kRenderRemoteList;
 
-    if (g_frameBufs.size() < g_remoteDraws.size()) g_frameBufs.resize(std::min<size_t>(g_remoteDraws.size(), 64));
+    if (g_frameBufs.size() < g_remoteDraws.size()) g_frameBufs.resize(g_remoteDraws.size());
     alignas(16) static uint8_t zeros[3][64] = {};
     for (size_t i = 0; i < g_remoteDraws.size() && i < g_frameBufs.size(); ++i) {
         const RemoteDraw& r = g_remoteDraws[i];
@@ -259,8 +232,7 @@ static void __fastcall HookCharRenderBuild(void* self, void* frameInfo, void* re
 bool Init(uintptr_t exeBase) {
     g_base = exeBase;
     auto at = [&](uintptr_t rva) { return (void*)(exeBase + rva); };
-    if (memcmp(at(kRvaGotoWorldplace), kSigGotoWorldplace, sizeof kSigGotoWorldplace) != 0 ||
-        memcmp(at(kRvaCurrentSceneIdx), kSigCurrentSceneIdx, sizeof kSigCurrentSceneIdx) != 0 ||
+    if (memcmp(at(kRvaCurrentSceneIdx), kSigCurrentSceneIdx, sizeof kSigCurrentSceneIdx) != 0 ||
         memcmp(at(kRvaGetSkiDirectionXY), kSigGetSkiDir, sizeof kSigGetSkiDir) != 0 ||
         memcmp(at(kRvaMakeGhostFrame), kSigMakeGhostFrame, sizeof kSigMakeGhostFrame) != 0 ||
         memcmp(at(kRvaDrawCharacter), kSigDrawCharacter, sizeof kSigDrawCharacter) != 0 ||
@@ -269,13 +241,11 @@ bool Init(uintptr_t exeBase) {
         Log("Unknown game build: signature mismatch. Mod disabled.");
         return false;
     }
-    g_goto = (GotoWorldplaceFn)at(kRvaGotoWorldplace);
     g_curIdx = (CurrentSceneIdxFn)at(kRvaCurrentSceneIdx);
     g_skiDir = (GetSkiDirFn)at(kRvaGetSkiDirectionXY);
     g_makeGhost = (MakeGhostFrameFn)at(kRvaMakeGhostFrame);
     g_drawChar = (DrawCharacterFn)at(kRvaDrawCharacter);
     g_getHue = (GetHueFn)at(kRvaGetHue);
-    g_frameBufs.reserve(64);  // never reallocates under the renderer's feet
 
     void** slot = (void**)at(kRvaCharRenderVtblSlot);
     if (*slot == at(kRvaCharRenderBuild)) {
@@ -308,14 +278,16 @@ void SetRemoteDraws(std::vector<RemoteDraw> draws) {
 bool RendererHooked() { return g_rendererHooked; }
 void* Globals() { return g_globals; }
 
+std::string ViewedScene(void* session) {
+    if (!g_curIdx || !session) return "";
+    uint64_t idx = g_curIdx((uint8_t*)session + kSessSceneIdx);
+    std::lock_guard<std::mutex> lk(g_mu);
+    return idx < g_sceneNames.size() ? g_sceneNames[idx] : "";
+}
+
 std::vector<std::string> SceneNames() {
     std::lock_guard<std::mutex> lk(g_mu);
     return g_sceneNames;
-}
-
-void RequestTravel(const std::string& scene) {
-    std::lock_guard<std::mutex> lk(g_mu);
-    g_travelTo = scene;
 }
 
 std::string PrettyScene(const std::string& s) {

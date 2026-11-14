@@ -10,7 +10,6 @@ struct IniValues {
     std::string hostAddress = "127.0.0.1";
     int port = 47800;
     std::string name = "Skier";
-    bool followHostScene = true;
     bool showNames = true;
     bool showPanel = true;
     std::string toggleKey = "F8";
@@ -37,11 +36,6 @@ inline std::string MakeIni(const IniValues& v) {
            "; (normally your Steam name and avatar are shown)\n"
            "name = " +
            v.name +
-           "\n"
-           "\n"
-           "; Clients automatically travel to whatever mountain the host is on\n"
-           "follow_host_scene = " +
-           b(v.followHostScene) +
            "\n"
            "\n"
            "; Interface\n"

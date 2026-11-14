@@ -7,6 +7,7 @@
 #include <cstring>
 #include <mutex>
 
+#include "game.h"
 #include "hook.h"
 #include "log.h"
 
@@ -62,6 +63,21 @@ static const uint8_t kSigMenuOnTop[16] = {0x40, 0x53, 0x48, 0x83, 0xec, 0x30, 0x
 using MenuOnTopFn = uint32_t(__fastcall*)(void* stack);
 static MenuOnTopFn g_menuOnTop;
 using MinimapPassFn = void(__fastcall*)(void* self, void* frameInfo, void* holder, void* p4, void* p5);
+// The piste-map pass also runs while other pages of the menu (Settings,
+// Controls, ...) are showing; it checks these first and draws nothing unless
+// the map page is up. Each takes frameInfo+0x258 (the frame's SessionInfo is
+// frameInfo itself; +0x258 is its scene state).
+//   map_page_ready:   menu state == 12              (FUN_1402d8910)
+//   map_page_shown:   the map widget is the page    (FUN_1402d87f0)
+// The mountain on show is current_scene_idx() (FUN_1402d8840), which follows
+// the mountain picked on the map: see game::ViewedScene.
+constexpr size_t kFrameMapScene = 0x258;
+constexpr uintptr_t kRvaMapPageReady = 0x2d8910, kRvaMapPageShown = 0x2d87f0;
+static const uint8_t kSigMapPageReady[11] = {0x48, 0x83, 0xec, 0x28, 0xe8, 0x77, 0xfd, 0xff, 0xff, 0x3c, 0x0c};
+static const uint8_t kSigMapPageShown[16] = {0x48, 0x83, 0xec, 0x38, 0x48, 0x8b, 0x49, 0x10,
+                                             0x48, 0x8d, 0x44, 0x24, 0x40, 0x48, 0x89, 0x44};
+using MapCheckFn = bool(__fastcall*)(void* sceneState);
+static MapCheckFn g_mapPageReady, g_mapPageShown;
 
 // ---- textures (how the title screen shows the Steam profile picture) --------
 // void gui_image(GuiList** holder, string_view* texture, float* rect(l,t,r,b),
@@ -187,7 +203,10 @@ static bool Project(const float vp[16], const float p[3], float& x, float& y) {
     for (int r = 0; r < 4; ++r) c[r] = vp[r] * p[0] + vp[4 + r] * p[1] + vp[8 + r] * p[2] + vp[12 + r];
     float w = c[3];
     bool front = w > 0.05f;
-    float aw = front ? w : -std::max(fabsf(w), 0.05f);  // mirror points behind the camera
+    // Behind the camera w is negative; dividing by it would mirror the point to
+    // the opposite side of the screen (the edge pin then points away from the
+    // player). Dividing by |w| keeps left as left and below as below.
+    float aw = std::max(fabsf(w), 0.05f);
     x = 0.5f + 0.5f * c[0] / aw;
     y = 0.5f - 0.5f * c[1] / aw;
     return front;
@@ -405,8 +424,21 @@ static void __fastcall HookIngameGui(void* self, void* frameInfo, void* holder) 
 // ---- piste map pass -----------------------------------------------------------
 static void __fastcall HookMinimapGui(void* self, void* frameInfo, void* holder, void* p4, void* p5) {
     g_origMinimap(self, frameInfo, holder, p4, p5);
+    if (!frameInfo || !holder || !p4 || !p5) return;
+    // Same checks the game makes before drawing the map (it returns early when
+    // another menu page is up, and our pins would land on that page).
+    void* sc = (uint8_t*)frameInfo + kFrameMapScene;
+    if (!g_mapPageReady(sc) || !g_mapPageShown(sc)) return;
     g_lastMapTick = GetTickCount64();
-    if (!holder || !p4 || !p5) return;
+    // Pins for everyone skiing on the mountain this map shows (which can be a
+    // different one from ours while browsing the other maps).
+    const std::string viewed = game::ViewedScene(frameInfo);
+    if (viewed.empty()) return;
+    static std::string lastViewed;
+    if (viewed != lastViewed) {
+        lastViewed = viewed;
+        Log("map: showing '%s'", viewed.c_str());
+    }
     uint8_t* mapState = *(uint8_t**)p4;
     uint8_t* rd = *(uint8_t**)p5;
     if (!mapState || !rd) return;
@@ -419,7 +451,7 @@ static void __fastcall HookMinimapGui(void* self, void* frameInfo, void* holder,
 
     std::lock_guard<std::mutex> lk(g_mu);
     for (const Player& p : g_frame.players) {
-        if (p.you || !p.visible) continue;
+        if (p.you || !p.onMap || p.scene != viewed) continue;
         float mapped[4] = {}, scr[2] = {};
         g_mapXf(xf, mapped, p.feet);
         g_mapProj(proj, scr, mapped);
@@ -455,9 +487,13 @@ bool Init(uintptr_t base) {
     } else {
         Log("GUI: texture upload signature mismatch, avatars disabled");
     }
+    g_mapPageReady = (MapCheckFn)at(kRvaMapPageReady);
+    g_mapPageShown = (MapCheckFn)at(kRvaMapPageShown);
     void** s1 = (void**)at(kSlotMetricTextsGui);
     void** s2 = (void**)at(kSlotMinimapGui);
-    if (*s1 != at(kRvaMetricTextsGui) || *s2 != at(kRvaMinimapGui)) {
+    bool mapChecks = !memcmp(at(kRvaMapPageReady), kSigMapPageReady, sizeof kSigMapPageReady) &&
+                     !memcmp(at(kRvaMapPageShown), kSigMapPageShown, sizeof kSigMapPageShown);
+    if (*s1 != at(kRvaMetricTextsGui) || *s2 != at(kRvaMinimapGui) || !mapChecks) {
         Log("GUI: vtable slots unexpected, multiplayer UI disabled");
         return false;
     }

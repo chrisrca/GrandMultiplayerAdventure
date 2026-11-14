@@ -16,7 +16,11 @@
 //       fake host that claims to be on <scene> and circles the client.
 //
 // Environment: GMA_FAKE_STEAMID=<SteamID64> makes the bot announce that Steam
-// account (its avatar is then shown); GMA_FAKE_NAME overrides the bot's name.
+// account (its avatar is then shown); GMA_FAKE_NAME overrides the bot's name;
+// GMA_FAKE_ID=<number> sets the player id (to run several bots at once);
+// GMA_FAKE_SCENE=<scene> makes a client bot claim to be on that mountain;
+// GMA_FAKE_STAY=1 makes a client bot stay on the first mountain it sees the
+// host on (it keeps circling the host's last spot there after the host leaves).
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
@@ -119,7 +123,11 @@ int main(int argc, char** argv) {
     if (const wchar_t* wn = _wgetenv(L"GMA_FAKE_NAME"))  // read as Unicode, send as UTF-8
         WideCharToMultiByte(CP_UTF8, 0, wn, -1, me.name, sizeof me.name - 1, nullptr, nullptr);
     if (const char* sid = getenv("GMA_FAKE_STEAMID")) me.steamId = strtoull(sid, nullptr, 10);
-    me.color = mode == kHost ? 4 : 3;
+    if (const char* id = getenv("GMA_FAKE_ID")) me.id = (uint32_t)strtoul(id, nullptr, 0);
+    const char* sceneOverride = getenv("GMA_FAKE_SCENE");
+    const bool stay = getenv("GMA_FAKE_STAY") != nullptr;
+    char stayScene[mp::kMaxScene] = {};
+    me.color = (uint8_t)(me.id % 8);
     me.hue = mode == kHost ? -0.6f : 0.45f;
     bool haveOther = false;
     double lastPrint = 0;
@@ -131,6 +139,16 @@ int main(int argc, char** argv) {
         while (Recv(s, in, &from)) {
             if (in.id == me.id) continue;
             if (mode != kHost && !(in.flags & mp::kFlagHost)) continue;  // follow the host only
+            if (stay) {
+                bool skiing = in.boneCount > 0 && (in.flags & mp::kFlagInWorld);
+                if (!stayScene[0] && skiing) {
+                    memcpy(stayScene, in.scene, sizeof stayScene);
+                    stayScene[mp::kMaxScene - 1] = 0;
+                    printf("staying on %s\n", stayScene);
+                }
+                // host loading or elsewhere: keep circling its last spot here
+                if (stayScene[0] && (!skiing || strncmp(in.scene, stayScene, mp::kMaxScene) != 0)) continue;
+            }
             other = in;
             haveOther = true;
             if (mode == kHost) {
@@ -157,8 +175,18 @@ int main(int argc, char** argv) {
                 yaw = (t + 1.5708f) - posemath::Heading(in);
             }
             PlacePose(other, me, at, yaw);
-            snprintf(me.scene, sizeof me.scene, "%s", mode == kHost ? hostScene : other.scene);
+            snprintf(me.scene, sizeof me.scene, "%s",
+                     mode == kHost ? hostScene : (sceneOverride ? sceneOverride : other.scene));
             me.flags = mp::kFlagInWorld | (mode == kHost ? mp::kFlagHost : 0);
+            if (other.flags & mp::kFlagHeading) {
+                // the facing the real player's game reports, turned with the pose
+                float d[2], r[2];
+                mp::UnpackHeading(other.heading, d);
+                r[0] = d[0] * cosf(yaw) - d[1] * sinf(yaw);
+                r[1] = d[0] * sinf(yaw) + d[1] * cosf(yaw);
+                me.heading = mp::PackHeading(r);
+                me.flags |= mp::kFlagHeading;
+            }
         } else if (mode == kHost) {
             snprintf(me.scene, sizeof me.scene, "%s", hostScene);
             me.flags = mp::kFlagHost;  // not in world yet, but announce the scene

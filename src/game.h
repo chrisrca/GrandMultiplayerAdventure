@@ -35,7 +35,6 @@ struct LocalInfo {
     float hue = 0;           // the player's "character_color_hue" setting
     int sceneIdx = -1;
     std::string scene;       // internal name, e.g. "waldtal"
-    bool loading = false;    // a scene change is queued/in progress
     double stamp = 0;        // QPC seconds when sampled
 };
 
@@ -53,7 +52,9 @@ bool RendererHooked();
 void* Globals();
 
 std::vector<std::string> SceneNames();
-void RequestTravel(const std::string& scene);
+// The mountain the piste map is showing (the frame's SessionInfo, as passed to
+// the map's GUI pass). Differs from LocalInfo::scene while browsing other maps.
+std::string ViewedScene(void* session);
 std::string PrettyScene(const std::string& internalName);
 double Now();
 
