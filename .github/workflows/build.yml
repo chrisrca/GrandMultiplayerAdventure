@@ -50,11 +50,12 @@ jobs:
           $setup = "build\GMA-Multiplayer-Setup.exe"
           function Run([string[]]$a) { (Start-Process $setup -ArgumentList $a -Wait -PassThru -NoNewWindow).ExitCode }
           if ((Run "--status", "--dir", "`"$game`"") -ne 3) { throw "status before install should be 'not installed'" }
-          if ((Run "--install", "--dir", "`"$game`"", "--name", "CI", "--mode", "client", "--host", "198.51.100.1") -ne 0) { throw "install failed" }
+          if ((Run "--install", "--dir", "`"$game`"") -ne 0) { throw "install failed" }
           if ((Run "--status", "--dir", "`"$game`"") -ne 0) { throw "status after install should be 'installed'" }
           if ((Get-Content "$game\zlib_orig.dll") -ne "original zlib") { throw "original zlib.dll was not backed up" }
           if ((Get-FileHash "$game\zlib.dll").Hash -ne (Get-FileHash "build\obj\zlib.dll").Hash) { throw "mod dll not installed" }
-          if (-not (Select-String -Path "$game\gma_mp.ini" -Pattern "^host_address = 198.51.100.1$")) { throw "settings not written" }
+          if (Test-Path "$game\gma_mp.ini") { throw "installer should not write settings" }
+          Set-Content "$game\gma_mp.ini" "mode = host"   # as the mod writes it on first launch
           if ((Run "--uninstall", "--dir", "`"$game`"") -ne 0) { throw "uninstall failed" }
           if ((Get-Content "$game\zlib.dll") -ne "original zlib") { throw "original zlib.dll was not restored" }
           if (Test-Path "$game\zlib_orig.dll") { throw "backup left behind" }

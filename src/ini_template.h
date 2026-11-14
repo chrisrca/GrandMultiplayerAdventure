@@ -1,6 +1,5 @@
-// The gma_mp.ini settings file, shared by the mod (writes defaults on first run
-// and saves changes made in the game's Settings screen) and the installer
-// (writes the values the user picked, keeping everything else).
+// The gma_mp.ini settings file, written by the mod (defaults on first run, then
+// every change made in the game under Settings > Multiplayer).
 #pragma once
 #include <string>
 

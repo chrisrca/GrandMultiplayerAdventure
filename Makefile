@@ -44,7 +44,7 @@ test: tests
 $(OBJ)/setup_res.o: installer/setup.rc installer/setup.manifest $(OBJ)/zlib.dll | $(OBJ)
 	$(WINDRES) installer/setup.rc -O coff -o $@
 
-$(BUILD)/GMA-Multiplayer-Setup.exe: installer/setup.cpp src/ini_template.h $(OBJ)/setup_res.o | $(BUILD)
+$(BUILD)/GMA-Multiplayer-Setup.exe: installer/setup.cpp $(OBJ)/setup_res.o | $(BUILD)
 	$(CXX) $(CXXFLAGS) -D_WIN32_WINNT=0x0A00 -municode -mwindows -static -s -o $@ installer/setup.cpp \
 		$(OBJ)/setup_res.o -lcomctl32 -lshell32 -lole32 -luser32 -lgdi32 -ladvapi32
 

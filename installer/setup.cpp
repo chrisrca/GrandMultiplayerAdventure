@@ -1,12 +1,12 @@
 // Grand Multiplayer Adventure - one-file installer.
 //
-// GUI (double-click): finds the game through Steam, asks for name / host or
-// join / port, installs the mod (zlib.dll proxy, embedded in this exe), writes
-// gma_mp.ini and optionally adds the Windows Firewall rule hosts need.
+// GUI (double-click): finds the game through Steam, installs or removes the mod
+// (zlib.dll proxy, embedded in this exe) and optionally adds the Windows
+// Firewall rule hosts need. All multiplayer settings live in the game itself
+// (Settings > Multiplayer); the mod writes its defaults on first launch.
 //
 // Command line (used by CI and for scripting):
-//   GMA-Multiplayer-Setup.exe --install [--dir <game dir>] [--name N] [--mode host|client]
-//                             [--host <ip>] [--port P] [--firewall]
+//   GMA-Multiplayer-Setup.exe --install [--dir <game dir>] [--firewall]
 //   GMA-Multiplayer-Setup.exe --uninstall [--dir <game dir>]
 //   GMA-Multiplayer-Setup.exe --status [--dir <game dir>]      (exit 0 = installed, 3 = not)
 #include <windows.h>
@@ -17,12 +17,9 @@
 
 #include <cstdio>
 #include <fstream>
-#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
-
-#include "../src/ini_template.h"
 
 #ifndef GMAMP_VERSION
 #define GMAMP_VERSION "dev"
@@ -129,38 +126,6 @@ static bool GameRunning() {
     return found;
 }
 
-// Everything in gma_mp.ini, so reinstalling keeps the choices made in game.
-using Settings = mp::IniValues;
-
-static Settings ReadSettings(const std::wstring& dir) {
-    Settings s;
-    std::string ini;
-    if (!ReadFile(Join(dir, L"gma_mp.ini"), ini)) return s;
-    std::istringstream in(ini);
-    std::string line;
-    auto trim = [](std::string v) {
-        while (!v.empty() && (v.back() == ' ' || v.back() == '\r' || v.back() == '\t')) v.pop_back();
-        while (!v.empty() && (v[0] == ' ' || v[0] == '\t')) v.erase(0, 1);
-        return v;
-    };
-    while (std::getline(in, line)) {
-        if (line.empty() || line[0] == ';' || line[0] == '#') continue;
-        size_t eq = line.find('=');
-        if (eq == std::string::npos) continue;
-        std::string k = trim(line.substr(0, eq)), v = trim(line.substr(eq + 1));
-        if (k == "mode") s.host = v != "client";
-        else if (k == "host_address") s.hostAddress = v;
-        else if (k == "port") s.port = atoi(v.c_str());
-        else if (k == "name") s.name = v;
-        else if (k == "follow_host_scene") s.followHostScene = atoi(v.c_str()) != 0;
-        else if (k == "show_names") s.showNames = atoi(v.c_str()) != 0;
-        else if (k == "show_panel") s.showPanel = atoi(v.c_str()) != 0;
-        else if (k == "toggle_key" && !v.empty()) s.toggleKey = v;
-        else if (k == "send_rate_hz") s.sendRateHz = atoi(v.c_str()) > 0 ? atoi(v.c_str()) : 20;
-    }
-    return s;
-}
-
 // Runs a command hidden and returns its exit code (or -1).
 static int RunHidden(const std::wstring& cmd) {
     STARTUPINFOW si{sizeof si};
@@ -203,7 +168,7 @@ static void RemoveFirewallRule() {
 }
 
 // ---- install / uninstall ------------------------------------------------------
-static std::wstring Install(const std::wstring& dir, const Settings& s, bool firewall) {
+static std::wstring Install(const std::wstring& dir, bool firewall) {
     if (!Exists(Join(dir, kExeName))) return L"gma_wonderlands.exe was not found in that folder.";
     if (GameRunning()) return L"Please close Grand Mountain Adventure first.";
     HRSRC res = FindResourceW(nullptr, MAKEINTRESOURCEW(IDR_MODDLL), (LPCWSTR)RT_RCDATA);
@@ -232,8 +197,6 @@ static std::wstring Install(const std::wstring& dir, const Settings& s, bool fir
         DeleteFileW(tmp.c_str());
         return L"Could not replace zlib.dll (error " + std::to_wstring(GetLastError()) + L").";
     }
-    std::ofstream ini(Join(dir, L"gma_mp.ini").c_str(), std::ios::binary);
-    ini << mp::MakeIni(s);
     if (firewall && !AddFirewallRule(dir))
         return L"Installed, but the Windows Firewall rule was not added (the admin prompt was declined?). Hosting may "
                L"not work until it is.";
@@ -268,43 +231,27 @@ static int RunCli(const std::vector<std::wstring>& args) {
         printf("Grand Mountain Adventure: Wonderlands was not found; pass --dir\n");
         return 2;
     }
-    // Start from the existing settings; options on the command line override them.
-    Settings s = ReadSettings(dir);
     bool firewall = false;
-    for (size_t i = 0; i < args.size(); ++i) {
-        const std::wstring& a = args[i];
-        auto next = [&]() { return i + 1 < args.size() ? args[++i] : std::wstring(); };
-        if (a == L"--name") s.name = U8(next());
-        else if (a == L"--mode") s.host = next() != L"client";
-        else if (a == L"--host") s.hostAddress = U8(next());
-        else if (a == L"--port") s.port = _wtoi(next().c_str());
-        else if (a == L"--firewall") firewall = true;
-        else if (a == L"--dir") ++i;
-    }
+    for (const std::wstring& a : args)
+        if (a == L"--firewall") firewall = true;
     if (action == L"--status") {
         bool inst = IsInstalled(dir);
         printf("%s: %s\n", U8(dir).c_str(), inst ? "installed" : "not installed");
         return inst ? 0 : 3;
     }
-    std::wstring err = action == L"--uninstall" ? Uninstall(dir, false) : Install(dir, s, firewall);
+    std::wstring err = action == L"--uninstall" ? Uninstall(dir, false) : Install(dir, firewall);
     printf("%s\n", err.empty() ? "OK" : U8(err).c_str());
     return err.empty() ? 0 : 1;
 }
 
 // ---- GUI ----------------------------------------------------------------------
 enum {
-    ID_DIR = 100, ID_BROWSE, ID_STATUS, ID_NAME, ID_HOSTMODE, ID_JOINMODE, ID_HOSTIP, ID_PORT, ID_FIREWALL,
-    ID_INSTALL, ID_UNINSTALL, ID_CLOSE, ID_NOTE
+    ID_DIR = 100, ID_BROWSE, ID_STATUS, ID_FIREWALL, ID_INSTALL, ID_UNINSTALL, ID_CLOSE, ID_NOTE
 };
 static HWND g_wnd;
 static HFONT g_font, g_titleFont;
 static std::wstring g_dir;
 
-static std::wstring GetText(int id) {
-    wchar_t buf[512];
-    GetDlgItemTextW(g_wnd, id, buf, 512);
-    return buf;
-}
 static void Refresh() {
     SetDlgItemTextW(g_wnd, ID_DIR, g_dir.empty() ? L"(not found - click Browse)" : g_dir.c_str());
     std::wstring st = g_dir.empty() ? L"Game not found" : (IsInstalled(g_dir) ? L"Status: installed" : L"Status: not installed");
@@ -312,20 +259,6 @@ static void Refresh() {
     EnableWindow(GetDlgItem(g_wnd, ID_UNINSTALL), !g_dir.empty() && IsInstalled(g_dir));
     EnableWindow(GetDlgItem(g_wnd, ID_INSTALL), !g_dir.empty());
     SetDlgItemTextW(g_wnd, ID_INSTALL, !g_dir.empty() && IsInstalled(g_dir) ? L"Update" : L"Install");
-    bool host = IsDlgButtonChecked(g_wnd, ID_HOSTMODE) == BST_CHECKED;
-    EnableWindow(GetDlgItem(g_wnd, ID_HOSTIP), !host);
-    std::wstring note = host ? L"Hosting: forward UDP port " + GetText(ID_PORT) +
-                                   L" on your router to this PC, then give your friends your public IP."
-                             : L"Joining: enter the host's public IP address (and the port they use).";
-    SetDlgItemTextW(g_wnd, ID_NOTE, note.c_str());
-}
-static void LoadSettings() {
-    Settings s = g_dir.empty() ? Settings{} : ReadSettings(g_dir);
-    SetDlgItemTextW(g_wnd, ID_NAME, W(s.name).c_str());
-    SetDlgItemTextW(g_wnd, ID_HOSTIP, W(s.hostAddress).c_str());
-    SetDlgItemTextW(g_wnd, ID_PORT, std::to_wstring(s.port).c_str());
-    CheckRadioButton(g_wnd, ID_HOSTMODE, ID_JOINMODE, s.host ? ID_HOSTMODE : ID_JOINMODE);
-    CheckDlgButton(g_wnd, ID_FIREWALL, (s.host && !FirewallRuleExists()) ? BST_CHECKED : BST_UNCHECKED);
 }
 
 static HWND Ctl(const wchar_t* cls, const wchar_t* text, DWORD style, int x, int y, int w, int h, int id) {
@@ -342,8 +275,6 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_COMMAND: {
         int id = LOWORD(wp);
         if (id == ID_CLOSE) DestroyWindow(h);
-        else if (id == ID_HOSTMODE || id == ID_JOINMODE) Refresh();
-        else if (id == ID_PORT && HIWORD(wp) == EN_CHANGE) Refresh();
         else if (id == ID_BROWSE) {
             BROWSEINFOW bi{};
             bi.hwndOwner = h;
@@ -355,7 +286,6 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 if (SHGetPathFromIDListW(pidl, path)) {
                     if (Exists(Join(path, kExeName))) {
                         g_dir = path;
-                        LoadSettings();
                     } else {
                         MessageBoxW(h, L"gma_wonderlands.exe is not in that folder.", L"Grand Multiplayer Adventure",
                                     MB_ICONWARNING);
@@ -365,24 +295,12 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             }
             Refresh();
         } else if (id == ID_INSTALL) {
-            Settings s = ReadSettings(g_dir);
-            s.name = U8(GetText(ID_NAME));
-            if (s.name.empty()) s.name = "Skier";
-            s.host = IsDlgButtonChecked(h, ID_HOSTMODE) == BST_CHECKED;
-            s.hostAddress = U8(GetText(ID_HOSTIP));
-            s.port = _wtoi(GetText(ID_PORT).c_str());
-            if (s.port <= 0 || s.port > 65535) s.port = 47800;
-            if (!s.host && (s.hostAddress.empty() || s.hostAddress == "127.0.0.1")) {
-                MessageBoxW(h, L"Enter the host's IP address to join a game.", L"Grand Multiplayer Adventure",
-                            MB_ICONINFORMATION);
-                break;
-            }
-            std::wstring err = Install(g_dir, s, IsDlgButtonChecked(h, ID_FIREWALL) == BST_CHECKED);
+            std::wstring err = Install(g_dir, IsDlgButtonChecked(h, ID_FIREWALL) == BST_CHECKED);
             Refresh();
             if (err.empty())
                 MessageBoxW(h,
-                            L"Installed! Start Grand Mountain Adventure from Steam.\n\nPress F8 in game to "
-                            L"collapse / expand the player list.",
+                            L"Installed! Start Grand Mountain Adventure from Steam.\n\nTo host or join, open "
+                            L"Settings > Multiplayer in the game. F8 shows / hides the player list.",
                             L"Grand Multiplayer Adventure", MB_ICONINFORMATION);
             else
                 MessageBoxW(h, err.c_str(), L"Grand Multiplayer Adventure", MB_ICONWARNING);
@@ -431,7 +349,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     g_wnd = CreateWindowExW(0, wc.lpszClassName, title.c_str(), WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
                             CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, nullptr, nullptr, inst, nullptr);
     UINT dpi = GetDpiForWindow(g_wnd);
-    RECT rc{0, 0, MulDiv(520, dpi, 96), MulDiv(396, dpi, 96)};
+    RECT rc{0, 0, MulDiv(520, dpi, 96), MulDiv(252, dpi, 96)};
     AdjustWindowRectExForDpi(&rc, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE, 0, dpi);
     SetWindowPos(g_wnd, nullptr, 0, 0, rc.right - rc.left, rc.bottom - rc.top, SWP_NOMOVE | SWP_NOZORDER);
     g_font = CreateFontW(-MulDiv(9, dpi, 72), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0,
@@ -446,23 +364,16 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     Ctl(L"EDIT", L"", WS_BORDER | ES_READONLY | ES_AUTOHSCROLL, 20, 96, 390, 24, ID_DIR);
     Ctl(L"BUTTON", L"Browse...", BS_PUSHBUTTON, 418, 95, 82, 26, ID_BROWSE);
     Ctl(L"STATIC", L"", 0, 20, 124, 480, 18, ID_STATUS);
-    Ctl(L"STATIC", L"Name (if not on Steam)", 0, 20, 152, 230, 18, 0);
-    Ctl(L"EDIT", L"", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 20, 172, 230, 24, ID_NAME);
-    Ctl(L"STATIC", L"Port", 0, 270, 152, 60, 18, 0);
-    Ctl(L"EDIT", L"", WS_BORDER | WS_TABSTOP | ES_NUMBER, 270, 172, 80, 24, ID_PORT);
-    Ctl(L"BUTTON", L"Host a game", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 20, 206, 120, 22, ID_HOSTMODE);
-    Ctl(L"BUTTON", L"Join a game", BS_AUTORADIOBUTTON, 150, 206, 120, 22, ID_JOINMODE);
-    Ctl(L"STATIC", L"Host IP address (when joining)", 0, 20, 234, 300, 18, 0);
-    Ctl(L"EDIT", L"", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 20, 254, 230, 24, ID_HOSTIP);
     Ctl(L"BUTTON", L"Allow the game through Windows Firewall (needed to host; asks for admin)",
-        BS_AUTOCHECKBOX | WS_TABSTOP, 20, 286, 480, 22, ID_FIREWALL);
-    Ctl(L"STATIC", L"", 0, 20, 312, 480, 36, ID_NOTE);
-    Ctl(L"BUTTON", L"Install", BS_DEFPUSHBUTTON | WS_TABSTOP, 236, 356, 90, 28, ID_INSTALL);
-    Ctl(L"BUTTON", L"Uninstall", BS_PUSHBUTTON | WS_TABSTOP, 332, 356, 90, 28, ID_UNINSTALL);
-    Ctl(L"BUTTON", L"Close", BS_PUSHBUTTON | WS_TABSTOP, 428, 356, 72, 28, ID_CLOSE);
+        BS_AUTOCHECKBOX | WS_TABSTOP, 20, 150, 480, 22, ID_FIREWALL);
+    Ctl(L"STATIC", L"Hosting and joining are set up in the game: Settings > Multiplayer.", 0, 20, 178, 480, 18,
+        ID_NOTE);
+    Ctl(L"BUTTON", L"Install", BS_DEFPUSHBUTTON | WS_TABSTOP, 236, 212, 90, 28, ID_INSTALL);
+    Ctl(L"BUTTON", L"Uninstall", BS_PUSHBUTTON | WS_TABSTOP, 332, 212, 90, 28, ID_UNINSTALL);
+    Ctl(L"BUTTON", L"Close", BS_PUSHBUTTON | WS_TABSTOP, 428, 212, 72, 28, ID_CLOSE);
 
     g_dir = FindGameDir();
-    LoadSettings();
+    CheckDlgButton(g_wnd, ID_FIREWALL, FirewallRuleExists() ? BST_UNCHECKED : BST_CHECKED);
     Refresh();
     ShowWindow(g_wnd, show);
 
