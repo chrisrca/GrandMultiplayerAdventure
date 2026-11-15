@@ -9,6 +9,7 @@
 // well under the MTU.
 #pragma once
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -61,6 +62,36 @@ struct PacketHeader {
 enum PacketType : uint8_t {
     kPktState = 2,   // one PlayerState (client->host, host->clients)
     kPktBye = 3,     // sender is leaving
+    kPktScores = 4,  // ScoreChunkHeader + part of the sender's challenge results
+};                   // (older builds ignore it)
+
+// ---- challenge results ------------------------------------------------------------
+// Everyone's saved results per challenge, shared so the piste map's result list
+// can show them. Key: "<scene>/<challenge>" (the game's internal names).
+struct Result {
+    float value;    // seconds or points, as the game stores it
+    uint8_t sport;  // the game's equipment type, 1..4 (icon in the list)
+};
+using Records = std::map<std::string, std::vector<Result>>;
+
+#pragma pack(push, 1)
+struct ScoreChunkHeader {
+    uint32_t sender;   // PlayerState::id
+    uint32_t version;  // changes whenever the sender's results change
+    uint16_t index;
+    uint16_t total;    // chunks in this version
+};
+#pragma pack(pop)
+constexpr size_t kScorePayloadMax = 1100;  // bytes of entries per datagram
+
+// Records <-> chunk payloads: per challenge u8 keyLen, key, u8 n, n x (f32, u8).
+// The version is a hash of the content.
+std::vector<std::string> EncodeRecords(const Records& r, uint32_t& version);
+bool DecodeRecords(const std::string& payload, Records& out);
+
+struct ScoreChunk {
+    ScoreChunkHeader h;
+    std::string payload;
 };
 
 // Facing direction <-> wire byte.
@@ -118,10 +149,18 @@ public:
     };
     std::vector<Event> TakeEvents() { auto e = std::move(events_); events_.clear(); return e; }
 
+    // Our challenge results, sent continuously in round-robin chunks.
+    void SetScores(uint32_t version, std::vector<std::string> payloads);
+    // Results chunks received from other players since the last call.
+    std::vector<ScoreChunk> TakeScoreChunks() { auto c = std::move(scoreIn_); scoreIn_.clear(); return c; }
+
 private:
     void Receive(double now);
     bool HandleState(const PlayerState& ps, double now, const void* fromAddr, int fromLen);
     void SendState(const PlayerState& ps, const void* addr, int addrLen);
+    void SendRaw(const void* data, int len, const void* addr, int addrLen);
+    void HandleScores(const uint8_t* data, int len);
+    void SendNextScoreChunk(const void* addr, int addrLen, bool toAllPeers);
 
     Config cfg_;
     uint32_t localId_ = 0;
@@ -143,6 +182,11 @@ private:
     uint8_t resolvedAddr_[16] = {};
     bool haveResolved_ = false;
     double lastResolve_ = -1e9;
+    uint32_t scoreVersion_ = 0;
+    std::vector<std::string> scoreOut_;
+    size_t scoreNext_ = 0;
+    double lastScoreSend_ = 0;
+    std::vector<ScoreChunk> scoreIn_;
     // All Net methods run on the game's render thread (inside the swap hook),
     // so no locking is needed.
 };

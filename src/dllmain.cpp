@@ -31,6 +31,7 @@
 #include "hook.h"
 #include "ini_template.h"
 #include "log.h"
+#include "map_extras.h"
 #include "net.h"
 #include "pose_math.h"
 #include "settings_menu.h"
@@ -41,6 +42,9 @@ namespace {
 // ---- state -------------------------------------------------------------------
 mp::Config g_cfg;
 mp::Net g_net;
+// Our challenge results as sent (kept to re-send after a network restart).
+uint32_t g_scoreVersion = 0;
+std::vector<std::string> g_scorePayloads;
 bool g_gameOk = false;
 bool g_guiOk = false;
 bool g_netOk = false;
@@ -369,6 +373,22 @@ size_t EditMax(int row) { return row == settings_menu::kRowPort ? 5 : 63; }
 WNDPROC g_origWndProc = nullptr;
 
 LRESULT CALLBACK MpWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    // Picking another skier on the piste map: a click that was ours (on / off a
+    // skier) is kept from the game, button up included.
+    static bool swallowUp = false;
+    if (m == WM_LBUTTONDOWN || m == WM_LBUTTONDBLCLK) {
+        RECT rc;
+        swallowUp = false;
+        if (GetClientRect(h, &rc) && rc.right > 0 && rc.bottom > 0 &&
+            gui::MapClick((float)(short)LOWORD(l) / rc.right, (float)(short)HIWORD(l) / rc.bottom)) {
+            swallowUp = true;
+            return 0;
+        }
+    }
+    if (m == WM_LBUTTONUP && swallowUp) {
+        swallowUp = false;
+        return 0;
+    }
     if (m == WM_KEYDOWN || m == WM_SYSKEYDOWN || m == WM_CHAR || m == WM_KEYUP || m == WM_SYSKEYUP) {
         std::unique_lock<std::mutex> lk(g_cfgMu);
         if (g_editRow >= 0) {
@@ -421,6 +441,7 @@ void EnsureWndProc() {
     g_origWndProc = (WNDPROC)SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)&MpWndProc);
     if (g_origWndProc) {
         hooked = h;
+        gui::SetWindow(h);
         Log("Keyboard text entry hooked (window %p)", (void*)h);
     }
 }
@@ -449,6 +470,7 @@ void RestartNet() {
     g_net = mp::Net();
     g_smooth.clear();
     g_netOk = g_net.Start(g_cfg, g_localId);
+    if (g_netOk) g_net.SetScores(g_scoreVersion, g_scorePayloads);
     if (!g_netOk) AddToast(g_cfg.host ? "Port " + std::to_string(g_cfg.port) + " is busy" : "Network error");
     else AddToast(g_cfg.host ? "Hosting on port " + std::to_string(g_cfg.port) : "Joining " + HostAddressText());
 }
@@ -574,8 +596,23 @@ void OnFrame() {
     }
     if (g_netOk) g_net.Tick(now, ps);
     for (auto& e : g_net.TakeEvents()) AddToast(e.name + (e.joined ? " joined" : " left"), e.steamId);
+    // Challenge results: ours out, everyone else's in.
+    {
+        mp::Records mine;
+        if (map_extras::TakeLocalRecords(mine)) {
+            g_scorePayloads = mp::EncodeRecords(mine, g_scoreVersion);
+            if (g_netOk) g_net.SetScores(g_scoreVersion, g_scorePayloads);
+        }
+        if (g_netOk)
+            for (const mp::ScoreChunk& c : g_net.TakeScoreChunks()) map_extras::OnScoreChunk(c);
+    }
 
     std::vector<mp::RemotePlayer> remotes = g_netOk ? g_net.Remotes() : std::vector<mp::RemotePlayer>{};
+    {
+        std::vector<std::pair<uint32_t, std::string>> who;
+        for (const mp::RemotePlayer& r : remotes) who.push_back({r.state.id, r.state.name});
+        map_extras::SetPlayers(who);
+    }
     std::vector<game::RemoteDraw> draws;
     gui::Frame gf;
     gf.showList = g_cfg.showPanel;
@@ -622,6 +659,7 @@ void OnFrame() {
         bool sameScene = inWorld && fresh && li.scene == st.scene;
 
         gui::Player gp;
+        gp.id = st.id;
         gp.name = st.name;
         gp.avatar = AvatarFor(st.steamId);
         memcpy(gp.color, kPalette[st.color % 8], sizeof gp.color);
@@ -810,6 +848,7 @@ void Attach() {
     g_gameOk = game::Init(base);
     g_guiOk = g_gameOk && gui::Init(base);
     if (g_gameOk) settings_menu::Init(base, MenuState, MenuClick);
+    if (g_guiOk) map_extras::Init(base);
 
     g_realSwap = (SwapFn)hook::PatchIAT((void*)base, "SDL2.dll", "SDL_GL_SwapWindow", (void*)&HookSwap);
     if (!g_realSwap) Log("Failed to hook SDL_GL_SwapWindow; multiplayer disabled");

@@ -14,7 +14,7 @@ OBJ     := build/obj
 
 CXXFLAGS := -O2 -std=c++17 -Wall -Wno-unused-function -DGMAMP_VERSION=\"$(VERSION)\"
 HEADERS  := $(wildcard src/*.h)
-MOD_SRC  := src/dllmain.cpp src/game.cpp src/gui.cpp src/hook.cpp src/log.cpp src/net.cpp src/steam.cpp src/settings_menu.cpp
+MOD_SRC  := src/dllmain.cpp src/game.cpp src/gui.cpp src/hook.cpp src/log.cpp src/net.cpp src/steam.cpp src/settings_menu.cpp src/map_extras.cpp
 NET_SRC  := src/net.cpp src/log.cpp
 
 .PHONY: all mod tools tests test installer clean

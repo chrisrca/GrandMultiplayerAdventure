@@ -20,6 +20,7 @@
 namespace gui {
 
 struct Player {
+    uint32_t id = 0;         // network id (0 for the local player)
     std::string name;
     std::string avatar;      // registered texture name ("" = no Steam avatar yet)
     float color[3] = {1, 1, 1};
@@ -68,5 +69,40 @@ void SetAspect(float widthOverHeight);
 // hook). `globals` is the game's GMAGlobals*. Returns false if the game isn't
 // ready yet.
 bool RegisterTexture(void* globals, const std::string& name, int w, int h, const uint8_t* rgba);
+
+// ---- piste map: picking other skiers -------------------------------------------
+// The game window (cursor position for hovering the map pins).
+void SetWindow(void* hwnd);
+// A left click at normalised window coordinates, on the piste map handled the
+// way the game handles clicks on its points of interest:
+//  - nothing selected: a click picks what has the hover ring; when that is a
+//    skier, they are selected (Go to <name>) and the camera zooms to them;
+//  - a skier selected: a click (not on the action button) deselects them and
+//    the camera goes back;
+//  - the game's own selection: the click is the game's.
+// Returns true when the click was ours (the game must not see it).
+bool MapClick(float x, float y);
+// What the game has in a map update (from the map update, after the game):
+// its selection (selChanged = changed in this update) and where it puts its
+// hover ring (the selection, else the point of interest nearest the cursor).
+struct GamePick {
+    bool selChanged;
+    bool selEngaged;
+    float sel[3];
+    bool hoverEngaged;
+    float hover[3];
+};
+void NoteGamePick(const GamePick& g);
+// What the map camera should do after a click on / off a skier (once).
+enum CameraAction { kCamNone, kCamZoomToSelected, kCamBack };
+CameraAction TakeCameraAction();
+// The selected skier's id (0 = none). Cleared when the map closes.
+uint32_t Selected();
+// The skier whose pin is under the cursor on the piste map and closer to it
+// than the game's hovered point of interest (0 = none).
+uint32_t HoveredPin();
+void ClearSelection();
+// Latest frame data for a player by id.
+bool GetPlayer(uint32_t id, Player& out);
 
 }  // namespace gui

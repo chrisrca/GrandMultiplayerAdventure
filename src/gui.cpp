@@ -394,6 +394,109 @@ static void DrawIngame(void* holder, const Frame& f) {
 
 static ULONGLONG g_lastMapTick = 0;
 
+// ---- picking skiers on the piste map --------------------------------------------
+// Pins drawn in the last map frame, for clicks (normalised screen coordinates).
+struct PinHit {
+    uint32_t id;
+    float x, y;
+};
+static std::vector<PinHit> g_pins;  // g_mu
+static uint32_t g_selected = 0;     // g_mu
+static HWND g_hwnd = nullptr;
+constexpr float kPinPickRadius = 0.045f;  // in screen heights (about the pin's ring)
+constexpr float kMapLeft = 0.255f;        // the info panel covers the map left of this
+
+void SetWindow(void* hwnd) { g_hwnd = (HWND)hwnd; }
+
+static bool MapShowing() { return GetTickCount64() - g_lastMapTick < 250; }
+
+static GamePick g_lastPick{};                // g_mu: latest map update
+static uint32_t g_hovered = 0;               // g_mu: set by the map frame
+static CameraAction g_camAction = kCamNone;  // g_mu
+
+bool MapClick(float x, float y) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!MapShowing()) return false;
+    if (g_selected) {
+        // like the game with something selected: a click deselects (except on
+        // the action button along the bottom) and the camera goes back
+        if (y >= 0.86f) return false;
+        Log("map: deselected skier %08X", g_selected);
+        g_selected = 0;
+        g_camAction = kCamBack;
+        return true;
+    }
+    if (g_lastPick.selEngaged || !g_hovered) return false;  // the game's click
+    // like the game with nothing selected: the click picks what has the ring
+    g_selected = g_hovered;
+    Log("map: selected skier %08X", g_selected);
+    g_camAction = kCamZoomToSelected;
+    return true;
+}
+
+void NoteGamePick(const GamePick& g) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    g_lastPick = g;
+}
+
+CameraAction TakeCameraAction() {
+    std::lock_guard<std::mutex> lk(g_mu);
+    CameraAction a = g_camAction;
+    g_camAction = kCamNone;
+    return a;
+}
+
+static bool CursorPos(float& x, float& y);
+
+uint32_t HoveredPin() {
+    std::lock_guard<std::mutex> lk(g_mu);
+    return MapShowing() ? g_hovered : 0;
+}
+
+// The nearest pin in reach of (x, y) (0 = none) and its distance (screen heights).
+static uint32_t NearestPin(float x, float y, float& dist) {
+    uint32_t best = 0;
+    float bestD = kPinPickRadius * kPinPickRadius;
+    for (const PinHit& p : g_pins) {
+        float dx = (x - p.x) * g_aspect, dy = y - p.y, d = dx * dx + dy * dy;
+        if (d < bestD) bestD = d, best = p.id;
+    }
+    dist = sqrtf(bestD);
+    return best;
+}
+
+uint32_t Selected() {
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!MapShowing()) g_selected = 0;
+    return g_selected;
+}
+
+void ClearSelection() {
+    std::lock_guard<std::mutex> lk(g_mu);
+    g_selected = 0;
+}
+
+bool GetPlayer(uint32_t id, Player& out) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    for (const Player& p : g_frame.players)
+        if (!p.you && p.id == id) {
+            out = p;
+            return true;
+        }
+    return false;
+}
+
+static bool CursorPos(float& x, float& y) {
+    if (!g_hwnd) return false;
+    POINT pt;
+    RECT rc;
+    if (!GetCursorPos(&pt) || !ScreenToClient(g_hwnd, &pt) || !GetClientRect(g_hwnd, &rc)) return false;
+    if (rc.right <= 0 || rc.bottom <= 0) return false;
+    x = (float)pt.x / rc.right;
+    y = (float)pt.y / rc.bottom;
+    return x >= 0 && x <= 1 && y >= 0 && y <= 1;
+}
+
 static void __fastcall HookIngameGui(void* self, void* frameInfo, void* holder) {
     g_origIngame(self, frameInfo, holder);
     if (!holder || !*(void**)holder || !frameInfo) return;
@@ -450,16 +553,43 @@ static void __fastcall HookMinimapGui(void* self, void* frameInfo, void* holder,
     const float yaw = *(float*)(mapState + 0x4c);
 
     std::lock_guard<std::mutex> lk(g_mu);
+    std::vector<PinHit> pins;
+    std::vector<const Player*> shown;
     for (const Player& p : g_frame.players) {
         if (p.you || !p.onMap || p.scene != viewed) continue;
         float mapped[4] = {}, scr[2] = {};
         g_mapXf(xf, mapped, p.feet);
         g_mapProj(proj, scr, mapped);
-        if (!(scr[0] > -0.1f && scr[0] < 1.1f && scr[1] > -0.1f && scr[1] < 1.1f)) continue;
+        // on the visible map only (not under the info panel on the left)
+        if (!(scr[0] > kMapLeft && scr[0] < 1.05f && scr[1] > -0.05f && scr[1] < 1.05f)) continue;
+        pins.push_back({p.id, scr[0], scr[1]});
+        shown.push_back(&p);
+    }
+    g_pins = pins;
+    // The hover ring follows the cursor only while nothing is selected (as the
+    // game's does); a pin gets it when closer to the cursor than the point of
+    // interest the game would ring. A click then picks what has the ring.
+    g_hovered = 0;
+    float cx, cy, dPin;
+    if (!g_selected && !g_lastPick.selEngaged && CursorPos(cx, cy)) {
+        uint32_t id = NearestPin(cx, cy, dPin);
+        if (id && g_lastPick.hoverEngaged) {
+            float mapped[4] = {}, scr[2] = {};
+            g_mapXf(xf, mapped, g_lastPick.hover);
+            g_mapProj(proj, scr, mapped);
+            float dx = (cx - scr[0]) * g_aspect, dy = cy - scr[1];
+            if (sqrtf(dx * dx + dy * dy) <= dPin) id = 0;
+        }
+        g_hovered = id;
+    }
+    // (hovered / selected skiers get the game's own hover ring: map_extras)
+    for (size_t i = 0; i < pins.size(); ++i) {
+        const Player& p = *shown[i];
+        const float x = pins[i].x, y = pins[i].y;
         float angle = yaw - atan2f(p.dir[1], p.dir[0]);  // same formula as the game's own pin
-        Pin(holder, scr[0], scr[1], 1.f, angle, p.color, 1.f, g_aspect);
-        Text(holder, p.name, LabelFont(p.name), scr[0], scr[1] - 0.06f, 0.025f, p.color, 0.95f, kAlignCenter,
-             kVAlignTop, 2, false);
+        Pin(holder, x, y, 1.f, angle, p.color, 1.f, g_aspect);
+        Text(holder, p.name, LabelFont(p.name), x, y - 0.06f, 0.025f, p.color, 0.95f, kAlignCenter, kVAlignTop, 2,
+             false);
     }
 }
 

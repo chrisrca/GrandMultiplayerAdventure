@@ -156,6 +156,10 @@ void Net::Stop() {
     WSACleanup();
 }
 
+void Net::SendRaw(const void* data, int len, const void* addr, int addrLen) {
+    sendto(S(sock_), (const char*)data, len, 0, (const sockaddr*)addr, addrLen);
+}
+
 void Net::SendState(const PlayerState& ps, const void* addr, int addrLen) {
     uint8_t buf[sizeof(PacketHeader) + sizeof(PlayerState)];
     PacketHeader h{kMagic, kProtoVersion, kPktState, 1};
@@ -217,10 +221,16 @@ void Net::Receive(double now) {
         int fromLen = sizeof from;
         int n = recvfrom(S(sock_), (char*)buf, sizeof buf, 0, (sockaddr*)&from, &fromLen);
         if (n <= 0) break;
-        if (n < (int)(sizeof(PacketHeader) + sizeof(PlayerState))) continue;
+        if (n < (int)sizeof(PacketHeader)) continue;
         PacketHeader h;
         memcpy(&h, buf, sizeof h);
-        if (h.magic != kMagic || h.version != kProtoVersion || h.count != 1) continue;
+        if (h.magic != kMagic || h.version != kProtoVersion) continue;
+        if (h.type == kPktScores) {
+            if (!cfg_.host) hostHeard_ = now;
+            HandleScores(buf, n);
+            continue;
+        }
+        if (n < (int)(sizeof(PacketHeader) + sizeof(PlayerState)) || h.count != 1) continue;
         PlayerState ps;
         memcpy(&ps, buf + sizeof h, sizeof ps);
 
@@ -265,6 +275,14 @@ void Net::Tick(double now, const PlayerState& local) {
     }
     peers_.erase(std::remove_if(peers_.begin(), peers_.end(), [&](const Peer& p) { return now - p.lastHeard > kTimeout; }),
                  peers_.end());
+
+    // Challenge results: quickly after a change, then slowly so late joiners get them.
+    double scoreGap = scoreNext_ < scoreOut_.size() ? 0.1 : 0.5;
+    if (!scoreOut_.empty() && now - lastScoreSend_ >= scoreGap) {
+        lastScoreSend_ = now;
+        if (cfg_.host) SendNextScoreChunk(nullptr, 0, true);
+        else if (haveResolved_) SendNextScoreChunk(resolvedAddr_, sizeof(sockaddr_in), false);
+    }
 
     if (now - lastSend_ < 1.0 / cfg_.sendRateHz) return;
     lastSend_ = now;
@@ -311,5 +329,99 @@ void Net::Tick(double now, const PlayerState& local) {
 }
 
 std::vector<RemotePlayer> Net::Remotes() const { return remotes_; }
+
+// ---- challenge results --------------------------------------------------------------
+void Net::SetScores(uint32_t version, std::vector<std::string> payloads) {
+    if (version == scoreVersion_ && payloads.size() == scoreOut_.size()) return;
+    scoreVersion_ = version;
+    scoreOut_ = std::move(payloads);
+    scoreNext_ = 0;
+}
+
+void Net::SendNextScoreChunk(const void* addr, int addrLen, bool toAllPeers) {
+    size_t i = scoreNext_++ % scoreOut_.size();
+    if (scoreNext_ >= 2 * scoreOut_.size()) scoreNext_ = scoreOut_.size();  // first round done
+    const std::string& p = scoreOut_[i];
+    uint8_t buf[sizeof(PacketHeader) + sizeof(ScoreChunkHeader) + kScorePayloadMax];
+    PacketHeader h{kMagic, kProtoVersion, kPktScores, 0};
+    ScoreChunkHeader ch{localId_, scoreVersion_, (uint16_t)i, (uint16_t)scoreOut_.size()};
+    size_t len = std::min(p.size(), kScorePayloadMax);
+    memcpy(buf, &h, sizeof h);
+    memcpy(buf + sizeof h, &ch, sizeof ch);
+    memcpy(buf + sizeof h + sizeof ch, p.data(), len);
+    int n = (int)(sizeof h + sizeof ch + len);
+    if (toAllPeers)
+        for (auto& q : peers_) SendRaw(buf, n, q.addr, q.addrLen);
+    else
+        SendRaw(buf, n, addr, addrLen);
+}
+
+void Net::HandleScores(const uint8_t* data, int len) {
+    if (len < (int)(sizeof(PacketHeader) + sizeof(ScoreChunkHeader))) return;
+    ScoreChunk c;
+    memcpy(&c.h, data + sizeof(PacketHeader), sizeof c.h);
+    if (c.h.sender == localId_ || c.h.total == 0 || c.h.index >= c.h.total) return;
+    // Only from players we know (their state arrives first), so stray packets
+    // can't create entries.
+    if (std::none_of(remotes_.begin(), remotes_.end(), [&](const RemotePlayer& r) { return r.state.id == c.h.sender; }))
+        return;
+    size_t off = sizeof(PacketHeader) + sizeof(ScoreChunkHeader);
+    c.payload.assign((const char*)data + off, len - off);
+    if (cfg_.host)  // relay to everyone else
+        for (auto& q : peers_)
+            if (q.id != c.h.sender) SendRaw(data, len, q.addr, q.addrLen);
+    if (scoreIn_.size() < 4096) scoreIn_.push_back(std::move(c));
+}
+
+static uint32_t Fnv(uint32_t h, const void* p, size_t n) {
+    for (size_t i = 0; i < n; ++i) h = (h ^ ((const uint8_t*)p)[i]) * 16777619u;
+    return h;
+}
+
+std::vector<std::string> EncodeRecords(const Records& r, uint32_t& version) {
+    std::vector<std::string> out;
+    std::string cur;
+    uint32_t h = 2166136261u;
+    for (const auto& kv : r) {
+        if (kv.first.empty() || kv.first.size() > 255 || kv.second.empty()) continue;
+        std::string e;
+        e += (char)kv.first.size();
+        e += kv.first;
+        size_t n = std::min<size_t>(kv.second.size(), 255);
+        e += (char)n;
+        for (size_t i = 0; i < n; ++i) {
+            e.append((const char*)&kv.second[i].value, 4);
+            e += (char)kv.second[i].sport;
+        }
+        if (e.size() > kScorePayloadMax) continue;
+        if (cur.size() + e.size() > kScorePayloadMax) out.push_back(std::move(cur)), cur.clear();
+        cur += e;
+        h = Fnv(h, e.data(), e.size());
+    }
+    if (!cur.empty()) out.push_back(std::move(cur));
+    version = h ? h : 1;
+    return out;
+}
+
+bool DecodeRecords(const std::string& p, Records& out) {
+    size_t i = 0;
+    while (i < p.size()) {
+        size_t kl = (uint8_t)p[i++];
+        if (i + kl + 1 > p.size()) return false;
+        std::string key = p.substr(i, kl);
+        i += kl;
+        size_t n = (uint8_t)p[i++];
+        if (i + n * 5 > p.size()) return false;
+        std::vector<Result>& v = out[key];
+        v.clear();
+        for (size_t k = 0; k < n; ++k, i += 5) {
+            Result r;
+            memcpy(&r.value, p.data() + i, 4);
+            r.sport = (uint8_t)p[i + 4];
+            if (std::isfinite(r.value)) v.push_back(r);
+        }
+    }
+    return true;
+}
 
 }  // namespace mp

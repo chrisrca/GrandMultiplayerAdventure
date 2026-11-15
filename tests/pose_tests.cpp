@@ -151,6 +151,40 @@ static void TestHeading() {
     CHECK(worst <= 0.71f, "heading byte round trip within %.2f deg", worst);
 }
 
+static void TestRecords() {
+    // Challenge results: many challenges split over several datagrams, decoded back intact.
+    mp::Records in;
+    for (int i = 0; i < 300; ++i) {
+        std::string key = "scene" + std::to_string(i % 12) + "/challenge_with_a_long_name_" + std::to_string(i);
+        for (int k = 0; k <= i % 5; ++k) in[key].push_back({31.81f + i + k * 0.37f, (uint8_t)(1 + k % 4)});
+    }
+    uint32_t v1 = 0, v2 = 0;
+    std::vector<std::string> chunks = mp::EncodeRecords(in, v1);
+    mp::EncodeRecords(in, v2);
+    bool fits = true;
+    for (auto& c : chunks) fits &= c.size() <= mp::kScorePayloadMax;
+    CHECK(chunks.size() > 1 && fits, "results split into %zu datagrams of <= %zu bytes", chunks.size(),
+          mp::kScorePayloadMax);
+    CHECK(v1 == v2 && v1 != 0, "results version is stable (%08X)", v1);
+    mp::Records out;
+    bool ok = true;
+    for (auto& c : chunks) ok &= mp::DecodeRecords(c, out);
+    bool same = ok && out.size() == in.size();
+    for (auto& kv : in) {
+        auto it = out.find(kv.first);
+        same = same && it != out.end() && it->second.size() == kv.second.size();
+        for (size_t k = 0; same && k < kv.second.size(); ++k)
+            same = it->second[k].value == kv.second[k].value && it->second[k].sport == kv.second[k].sport;
+    }
+    CHECK(same, "results decode back intact (%zu challenges)", out.size());
+    in["scene0/challenge_with_a_long_name_0"][0].value = 1.f;
+    uint32_t v3 = 0;
+    mp::EncodeRecords(in, v3);
+    CHECK(v3 != v1, "a changed result changes the version");
+    mp::Records junk;
+    CHECK(!mp::DecodeRecords(std::string("\x05" "ab", 3), junk), "truncated results are rejected");
+}
+
 static void TestRotation() {
     printf("rotation: heading, lean and bone lengths (yaw sweep -180..180, through the network codec)\n");
     float src[mp::kMaxBones][kBoneFloats] = {}, rot[mp::kMaxBones][kBoneFloats] = {},
@@ -305,6 +339,7 @@ int main() {
     TestPackRoundTrip();
     TestRotation();
     TestHeading();
+    TestRecords();
     TestSmoothing();
     TestNetworkRelay();
     printf("\n%d checks, %d failed\n", g_checks, g_failures);

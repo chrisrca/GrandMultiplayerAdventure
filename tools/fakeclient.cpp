@@ -70,14 +70,63 @@ static void Send(SOCKET s, const mp::PlayerState& ps, const sockaddr* to, int to
     sendto(s, (char*)out, sizeof out, 0, to, toLen);
 }
 
+// Challenge results the bot pretends to have: the host's own, slightly changed
+// (GMA_FAKE_SCORE_FACTOR, default 0.97 = 3% better), so they land on the same
+// challenges' lists.
+static mp::Records g_hostScores, g_myScores;
+static uint32_t g_hostScoreVersion = 0;
+static float g_scoreFactor = 0.97f;
+
+static void OnHostScores(const uint8_t* buf, int n) {
+    if (n < (int)(sizeof(mp::PacketHeader) + sizeof(mp::ScoreChunkHeader))) return;
+    mp::ScoreChunkHeader ch;
+    memcpy(&ch, buf + sizeof(mp::PacketHeader), sizeof ch);
+    if (ch.version != g_hostScoreVersion) g_hostScoreVersion = ch.version, g_hostScores.clear();
+    size_t off = sizeof(mp::PacketHeader) + sizeof ch;
+    mp::DecodeRecords(std::string((const char*)buf + off, n - off), g_hostScores);
+    g_myScores.clear();
+    for (auto& kv : g_hostScores)
+        for (const mp::Result& r : kv.second)
+            g_myScores[kv.first].push_back({r.value * g_scoreFactor, (uint8_t)(r.sport % 4 + 1)});
+}
+
+static void SendScores(SOCKET s, uint32_t id, const sockaddr* to, int toLen) {
+    static size_t next = 0;
+    if (g_myScores.empty()) return;
+    uint32_t version = 0;
+    std::vector<std::string> chunks = mp::EncodeRecords(g_myScores, version);
+    size_t i = next++ % chunks.size();
+    uint8_t out[sizeof(mp::PacketHeader) + sizeof(mp::ScoreChunkHeader) + mp::kScorePayloadMax];
+    mp::PacketHeader h{mp::kMagic, mp::kProtoVersion, mp::kPktScores, 0};
+    mp::ScoreChunkHeader ch{id, version, (uint16_t)i, (uint16_t)chunks.size()};
+    memcpy(out, &h, sizeof h);
+    memcpy(out + sizeof h, &ch, sizeof ch);
+    memcpy(out + sizeof h + sizeof ch, chunks[i].data(), chunks[i].size());
+    sendto(s, (char*)out, (int)(sizeof h + sizeof ch + chunks[i].size()), 0, to, toLen);
+}
+
 static bool Recv(SOCKET s, mp::PlayerState& ps, sockaddr_in* from) {
     uint8_t buf[2048];
     int fl = sizeof(sockaddr_in);
-    int n = recvfrom(s, (char*)buf, sizeof buf, 0, (sockaddr*)from, &fl);
-    if (n < (int)(sizeof(mp::PacketHeader) + sizeof(mp::PlayerState))) return false;
+    for (;;) {
+        int n = recvfrom(s, (char*)buf, sizeof buf, 0, (sockaddr*)from, &fl);
+        if (n < (int)sizeof(mp::PacketHeader)) return false;
+        mp::PacketHeader h;
+        memcpy(&h, buf, sizeof h);
+        if (h.magic != mp::kMagic || h.version != mp::kProtoVersion) continue;
+        if (h.type == mp::kPktScores) {
+            mp::ScoreChunkHeader ch;
+            if (n >= (int)(sizeof h + sizeof ch)) memcpy(&ch, buf + sizeof h, sizeof ch);
+            // only the host's own results (not other bots' relayed ones)
+            // (bot ids start with 0xB0)
+            if (n >= (int)(sizeof h + sizeof ch) && (ch.sender >> 24) != 0xB0) OnHostScores(buf, n);
+            continue;
+        }
+        if (n < (int)(sizeof h + sizeof(mp::PlayerState)) || h.type != mp::kPktState) continue;
+        break;
+    }
     mp::PacketHeader h;
     memcpy(&h, buf, sizeof h);
-    if (h.magic != mp::kMagic || h.version != mp::kProtoVersion || h.type != mp::kPktState) return false;
     memcpy(&ps, buf + sizeof h, sizeof ps);
     return true;
 }
@@ -125,6 +174,7 @@ int main(int argc, char** argv) {
     if (const char* sid = getenv("GMA_FAKE_STEAMID")) me.steamId = strtoull(sid, nullptr, 10);
     if (const char* id = getenv("GMA_FAKE_ID")) me.id = (uint32_t)strtoul(id, nullptr, 0);
     const char* sceneOverride = getenv("GMA_FAKE_SCENE");
+    if (const char* f = getenv("GMA_FAKE_SCORE_FACTOR")) g_scoreFactor = (float)atof(f);
     const bool stay = getenv("GMA_FAKE_STAY") != nullptr;
     char stayScene[mp::kMaxScene] = {};
     me.color = (uint8_t)(me.id % 8);
@@ -193,6 +243,11 @@ int main(int argc, char** argv) {
         }
         me.seq++;
         if (havePeer) Send(s, me, (sockaddr*)&peer, sizeof peer);
+        static double lastScores = 0;
+        if (havePeer && mode != kHost && now - lastScores > 0.3) {
+            lastScores = now;
+            SendScores(s, me.id, (sockaddr*)&peer, sizeof peer);
+        }
         if (now - lastPrint > 2) {
             lastPrint = now;
             printf("t=%.0fs other=%s scene=%s bones=%d root=(%.1f,%.1f,%.1f)\n", now, haveOther ? other.name : "-",

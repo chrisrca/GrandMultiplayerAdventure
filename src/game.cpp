@@ -11,6 +11,7 @@
 
 #include "hook.h"
 #include "log.h"
+#include "map_extras.h"
 
 namespace game {
 
@@ -190,6 +191,7 @@ static void __fastcall HookHandleSceneMax(void* session, void* mutator) {
         li.hue = std::isfinite(hue) ? hue : 0.f;
     }
     g_local = li;
+    map_extras::OnGameTick(session);  // our saved challenge results (read on this thread)
 }
 
 // Runs whenever the game builds the render data for all characters (once per
