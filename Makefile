@@ -41,12 +41,13 @@ $(OBJ)/gma_mp_tests.exe: tests/pose_tests.cpp $(NET_SRC) $(HEADERS) | $(OBJ)
 test: tests
 	./$(OBJ)/gma_mp_tests.exe
 
-$(OBJ)/setup_res.o: installer/setup.rc installer/setup.manifest $(OBJ)/zlib.dll | $(OBJ)
+$(OBJ)/setup_res.o: installer/setup.rc installer/setup.manifest installer/icon.ico \
+		installer/fonts/Staatliches-Regular.ttf installer/fonts/ContrailOne-Regular.ttf $(OBJ)/zlib.dll | $(OBJ)
 	$(WINDRES) installer/setup.rc -O coff -o $@
 
-$(BUILD)/GMA-Multiplayer-Setup.exe: installer/setup.cpp $(OBJ)/setup_res.o | $(BUILD)
+$(BUILD)/GMA-Multiplayer-Setup.exe: installer/setup.cpp installer/scene.cpp installer/scene.h $(OBJ)/setup_res.o | $(BUILD)
 	$(CXX) $(CXXFLAGS) -D_WIN32_WINNT=0x0A00 -municode -mwindows -static -s -o $@ installer/setup.cpp \
-		$(OBJ)/setup_res.o -lcomctl32 -lshell32 -lole32 -luser32 -lgdi32 -ladvapi32
+		installer/scene.cpp $(OBJ)/setup_res.o -lshell32 -lole32 -luser32 -lgdi32 -lgdiplus -ldwmapi -ladvapi32
 
 clean:
 	rm -rf $(BUILD)

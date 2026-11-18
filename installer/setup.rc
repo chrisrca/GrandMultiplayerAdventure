@@ -5,5 +5,38 @@
 // The mod itself, written to <game>\zlib.dll on install.
 101 RCDATA "build/obj/zlib.dll"
 
-// Common controls v6 (themed buttons), per-monitor DPI awareness.
+// The game's UI fonts, both under the SIL Open Font License (licences in
+// installer/fonts): Staatliches, its menu font, for the headings and buttons,
+// and Contrail One, its italic "Menu" / "Next Mountain" font, for the links.
+102 RCDATA "installer/fonts/Staatliches-Regular.ttf"
+103 RCDATA "installer/fonts/ContrailOne-Regular.ttf"
+
+// Names the installer in Explorer and in Windows' admin (UAC) prompt.
+1 VERSIONINFO
+FILEVERSION 0,0,0,0
+PRODUCTVERSION 0,0,0,0
+FILEFLAGSMASK 0x3f
+FILEFLAGS 0x0
+FILEOS 0x40004
+FILETYPE 0x1
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription", "Grand Multiplayer Adventure Setup"
+            VALUE "ProductName", "Grand Multiplayer Adventure"
+            VALUE "OriginalFilename", "GMA-Multiplayer-Setup.exe"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
+
+// Common controls v6, per-monitor DPI awareness.
 1 RT_MANIFEST "installer/setup.manifest"
+
+// The app icon (made by the installer itself: GMA-Multiplayer-Setup.exe --icon installer/icon.ico).
+1 ICON "installer/icon.ico"
